@@ -1,1 +1,1 @@
-./android-quality-checker /Users/user/Projects/android/jaklingko-android report.md  --severity=MEDIUM
+./android-quality-checker /Users/user/Projects/android/jaklingko-android report.md  --severity=CRITICAL

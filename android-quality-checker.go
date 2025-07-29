@@ -407,11 +407,11 @@ func main() {
 
 	checker := NewCodeQualityChecker()
 
-
-	
 	fmt.Println("Checking local.properties...")
 	checker.checkLocalPropertiesFile(projectPath+"/local.properties")
 	
+	checker.checkProductionReadiness(projectPath)
+
 	// Scan the project
 	if err := checker.scanProject(projectPath); err != nil {
 		fmt.Printf("Error scanning project: %v\n", err)
@@ -742,4 +742,404 @@ func getCurrentGitBranch(projectPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
+}
+
+func (c *CodeQualityChecker) checkProductionReadiness(projectPath string) {
+	fmt.Println("Checking production readiness...")
+	
+	// Check build.gradle files for production settings
+	c.checkBuildConfiguration(projectPath)
+	
+	// Check for base URLs in code files
+	c.checkBaseUrls(projectPath)
+	
+	// Check for HTTP debugging tools
+	c.checkHttpDebugging(projectPath)
+	
+	// Check for debug modes and accessibility
+	c.checkDebugModes(projectPath)
+	
+	// Check for hardcoded values
+	c.checkHardcodedValues(projectPath)
+}
+
+// Check build.gradle for production configuration
+func (c *CodeQualityChecker) checkBuildConfiguration(projectPath string) {
+	filepath.WalkDir(projectPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		if d.IsDir() && shouldSkipDir(d.Name()) {
+			return fs.SkipDir
+		}
+		
+		
+		if d.Name() == "build.gradle" || d.Name() == "build.gradle.kts" {
+			c.analyzeBuildGradle(path)
+		}
+		
+		return nil
+	})
+}
+
+func (c *CodeQualityChecker) analyzeBuildGradle(gradlePath string) {
+	file, err := os.Open(gradlePath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+	inReleaseBlock := false
+	
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+		
+		// Track build type blocks
+		if strings.Contains(line, "release {") {
+			inReleaseBlock = true
+		} else if strings.Contains(line, "debug {") {
+		} else if line == "}" {
+			inReleaseBlock = false
+		}
+		
+		// Check for production build settings
+		if inReleaseBlock {
+			if strings.Contains(line, "debuggable true") {
+				c.addIssue(gradlePath, lineNum, "Production Config", 
+					"Release build should not be debuggable", "CRITICAL")
+			}
+			
+			if !strings.Contains(line, "minifyEnabled true") && strings.Contains(line, "minifyEnabled") {
+				c.addIssue(gradlePath, lineNum, "Production Config", 
+					"Release build should enable code minification", "HIGH")
+			}
+			
+			if !strings.Contains(line, "shrinkResources true") && strings.Contains(line, "shrinkResources") {
+				c.addIssue(gradlePath, lineNum, "Production Config", 
+					"Release build should enable resource shrinking", "MEDIUM")
+			}
+		}
+		
+		// Check for HTTP debugging dependencies
+		httpDebugDeps := []string{
+			"com.github.chuckerteam.chucker",
+			"com.facebook.flipper",
+			"com.facebook.stetho",
+			"com.squareup.leakcanary",
+			"com.readystatesoftware.chuck",
+		}
+		
+		for _, dep := range httpDebugDeps {
+			if strings.Contains(line, dep) && !strings.Contains(line, "debugImplementation") {
+				c.addIssue(gradlePath, lineNum, "HTTP Debugger", 
+					fmt.Sprintf("HTTP debugging tool '%s' should only be in debugImplementation", dep), "HIGH")
+			}
+		}
+		
+		// Check for logging dependencies in release
+		loggingDeps := []string{
+			"com.jakewharton.timber",
+			"org.slf4j",
+		}
+		
+		for _, dep := range loggingDeps {
+			if strings.Contains(line, dep) && strings.Contains(line, "implementation") && !strings.Contains(line, "debugImplementation") {
+				c.addIssue(gradlePath, lineNum, "Logging Dependency", 
+					fmt.Sprintf("Logging library '%s' should be debugImplementation only", dep), "MEDIUM")
+			}
+		}
+	}
+}
+
+func shouldSkipDir(name string) bool {
+	skipDirs := []string{".git", "node_modules", "build", ".gradle", "out", ".idea"}
+	for _, skip := range skipDirs {
+		if name == skip {
+			return true
+		}
+	}
+	return false
+}
+// Check for base URLs in source code
+func (c *CodeQualityChecker) checkBaseUrls(projectPath string) {
+	filepath.WalkDir(projectPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		
+		if d.IsDir() && shouldSkipDir(d.Name()) {
+			return fs.SkipDir
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".java" || ext == ".kt" || ext == ".xml" {
+			c.analyzeBaseUrls(path)
+		}
+		
+		return nil
+	})
+}
+
+func (c *CodeQualityChecker) analyzeBaseUrls(filePath string) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+	
+	// Patterns for non-production URLs
+	nonProdPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)https?://.*localhost`),
+		regexp.MustCompile(`(?i)https?://.*127\.0\.0\.1`),
+		regexp.MustCompile(`(?i)https?://.*192\.168\.`),
+		regexp.MustCompile(`(?i)https?://.*10\.0\.`),
+		regexp.MustCompile(`(?i)https?://.*\.local`),
+		regexp.MustCompile(`(?i)https?://.*staging`),
+		regexp.MustCompile(`(?i)https?://.*test`),
+		regexp.MustCompile(`(?i)https?://.*dev`),
+		regexp.MustCompile(`(?i)https?://.*debug`),
+		regexp.MustCompile(`(?i)base_?url.*=.*"https?://.*(?:localhost|127\.0\.0\.1|staging|test|dev)`),
+	}
+	
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+		
+		for _, pattern := range nonProdPatterns {
+			if pattern.MatchString(line) {
+				c.addIssue(filePath, lineNum, "Non-Production URL", 
+					"Base URL appears to be non-production (localhost/staging/test)", "CRITICAL")
+			}
+		}
+		
+		// Check for hardcoded URLs that should be configurable
+		urlPattern := regexp.MustCompile(`"https?://[^"]+\.com[^"]*"`)
+		if urlPattern.MatchString(line) && !strings.Contains(line, "//") {
+			c.addIssue(filePath, lineNum, "Hardcoded URL", 
+				"URL should be configurable, not hardcoded", "MEDIUM")
+		}
+	}
+}
+
+// Check for HTTP debugging tools in code
+func (c *CodeQualityChecker) checkHttpDebugging(projectPath string) {
+	filepath.WalkDir(projectPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		if d.IsDir() && shouldSkipDir(d.Name()) {
+			return fs.SkipDir
+		}
+		
+		
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".java" || ext == ".kt" {
+			c.analyzeHttpDebugging(path)
+		}
+		
+		return nil
+	})
+}
+
+func (c *CodeQualityChecker) analyzeHttpDebugging(filePath string) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+	
+	// HTTP debugging patterns
+	debugPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)chucker`),
+		regexp.MustCompile(`(?i)flipper`),
+		regexp.MustCompile(`(?i)stetho`),
+		regexp.MustCompile(`(?i)leakcanary`),
+		regexp.MustCompile(`(?i)chuck`),
+		regexp.MustCompile(`(?i)httploggininterceptor`),
+		regexp.MustCompile(`(?i)\.addInterceptor.*logging`),
+	}
+	
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+		
+		// Skip comments
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		
+		for _, pattern := range debugPatterns {
+			if pattern.MatchString(line) {
+				c.addIssue(filePath, lineNum, "HTTP Debugger", 
+					"HTTP debugging tool found - should be removed for production", "HIGH")
+			}
+		}
+	}
+}
+
+// Check for debug modes and accessibility
+func (c *CodeQualityChecker) checkDebugModes(projectPath string) {
+	filepath.WalkDir(projectPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		
+		if d.IsDir() && shouldSkipDir(d.Name()) {
+			return fs.SkipDir
+		}
+		
+
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".java" || ext == ".kt" || ext == ".xml" {
+			c.analyzeDebugModes(path)
+		}
+		
+		return nil
+	})
+}
+
+func (c *CodeQualityChecker) analyzeDebugModes(filePath string) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+	
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+		
+		// Skip comments
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		
+		// Check for debug flags
+		debugPatterns := []struct {
+			pattern     *regexp.Regexp
+			description string
+			severity    string
+		}{
+			{regexp.MustCompile(`(?i)BuildConfig\.DEBUG`), "BuildConfig.DEBUG usage found", "MEDIUM"},
+			{regexp.MustCompile(`(?i)\.setDebug\(true\)`), "Debug mode explicitly enabled", "HIGH"},
+			{regexp.MustCompile(`(?i)debug\s*=\s*true`), "Debug flag set to true", "HIGH"},
+			{regexp.MustCompile(`(?i)isDebuggable\(\)`), "Debuggable check found", "LOW"},
+			{regexp.MustCompile(`(?i)gesture.*debug`), "Gesture debugging enabled", "MEDIUM"},
+			{regexp.MustCompile(`(?i)accessibility.*debug`), "Accessibility debugging enabled", "MEDIUM"},
+			{regexp.MustCompile(`(?i)StrictMode`), "StrictMode usage found", "MEDIUM"},
+		}
+		
+		for _, dp := range debugPatterns {
+			if dp.pattern.MatchString(line) {
+				c.addIssue(filePath, lineNum, "Debug Mode", dp.description, dp.severity)
+			}
+		}
+	}
+}
+
+// Check for hardcoded values
+func (c *CodeQualityChecker) checkHardcodedValues(projectPath string) {
+	filepath.WalkDir(projectPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		
+		if d.IsDir() && shouldSkipDir(d.Name()) {
+			return fs.SkipDir
+		}
+		
+
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".java" || ext == ".kt" || ext == ".xml" {
+			c.analyzeHardcodedValues(path)
+		}
+		
+		return nil
+	})
+}
+
+func (c *CodeQualityChecker) analyzeHardcodedValues(filePath string) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+	
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+		
+		// Skip comments and empty lines
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "<!--") {
+			continue
+		}
+		
+		// Critical hardcoded values
+		criticalPatterns := []struct {
+			pattern     *regexp.Regexp
+			description string
+		}{
+			{regexp.MustCompile(`(?i)"[a-zA-Z0-9]{20,}"`), "Potential hardcoded API key or token"},
+			{regexp.MustCompile(`(?i)password\s*=\s*"[^"]+"`), "Hardcoded password"},
+			{regexp.MustCompile(`(?i)secret\s*=\s*"[^"]+"`), "Hardcoded secret"},
+			{regexp.MustCompile(`(?i)token\s*=\s*"[^"]+"`), "Hardcoded token"},
+			{regexp.MustCompile(`(?i)api_?key\s*=\s*"[^"]+"`), "Hardcoded API key"},
+		}
+		
+		for _, cp := range criticalPatterns {
+			if cp.pattern.MatchString(line) {
+				c.addIssue(filePath, lineNum, "Hardcoded Secret", cp.description, "CRITICAL")
+			}
+		}
+		
+		// High priority hardcoded values
+		highPatterns := []struct {
+			pattern     *regexp.Regexp
+			description string
+		}{
+			{regexp.MustCompile(`"https?://[^"]+"`), "Hardcoded URL - should be configurable"},
+			{regexp.MustCompile(`(?i)database.*=.*"[^"]+"`), "Hardcoded database configuration"},
+			{regexp.MustCompile(`(?i)server.*=.*"[^"]+"`), "Hardcoded server configuration"},
+		}
+		
+		for _, hp := range highPatterns {
+			if hp.pattern.MatchString(line) {
+				c.addIssue(filePath, lineNum, "Hardcoded Config", hp.description, "HIGH")
+			}
+		}
+		
+		// Medium priority hardcoded values
+		mediumPatterns := []struct {
+			pattern     *regexp.Regexp
+			description string
+		}{
+			{regexp.MustCompile(`"[^"]*@[^"]*\.[^"]*"`), "Hardcoded email address"},
+			{regexp.MustCompile(`"\+?[0-9\-\s\(\)]{10,}"`), "Hardcoded phone number"},
+			{regexp.MustCompile(`"[0-9]{4,}"`), "Potential hardcoded numeric value"},
+		}
+		
+		for _, mp := range mediumPatterns {
+			if mp.pattern.MatchString(line) {
+				c.addIssue(filePath, lineNum, "Hardcoded Value", mp.description, "MEDIUM")
+			}
+		}
+	}
 }
