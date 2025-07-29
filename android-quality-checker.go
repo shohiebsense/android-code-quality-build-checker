@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -200,6 +201,10 @@ func (c *CodeQualityChecker) checkAndroidSpecific(projectPath string) {
 	filepath.WalkDir(projectPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
+		}
+
+		if d.IsDir() && shouldSkipDir(d.Name()) {
+			return fs.SkipDir
 		}
 
 		if d.Name() == "build.gradle" || d.Name() == "build.gradle.kts" {
@@ -736,12 +741,48 @@ func (c *CodeQualityChecker) generateMarkdownReportWithFilter(minSeverity string
 }
 
 func getCurrentGitBranch(projectPath string) string {
-	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
+	// Try different Git command variations for cross-platform compatibility
+	gitCommands := [][]string{
+		{"git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD"},
+		{"git.exe", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD"},
 	}
-	return strings.TrimSpace(string(output))
+	
+	// On Windows, also try with cmd wrapper
+	if runtime.GOOS == "windows" {
+		gitCommands = append(gitCommands, 
+			[]string{"cmd", "/C", "git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD"})
+	}
+	
+	for _, cmdArgs := range gitCommands {
+		cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+		output, err := cmd.Output()
+		if err == nil {
+			return strings.TrimSpace(string(output))
+		}
+	}
+	
+	// Fallback: try reading .git/HEAD directly
+	return readGitHeadFile(projectPath)
+}
+
+func readGitHeadFile(projectPath string) string {
+	headFile := filepath.Join(projectPath, ".git", "HEAD")
+	content, err := os.ReadFile(headFile)
+	if err != nil {
+		return "unknown"
+	}
+	
+	headContent := strings.TrimSpace(string(content))
+	if strings.HasPrefix(headContent, "ref: refs/heads/") {
+		return strings.TrimPrefix(headContent, "ref: refs/heads/")
+	}
+	
+	// If HEAD is detached, return short commit hash
+	if len(headContent) >= 8 {
+		return "detached-" + headContent[:8]
+	}
+	
+	return "unknown"
 }
 
 func (c *CodeQualityChecker) checkProductionReadiness(projectPath string) {
