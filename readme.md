@@ -12,3 +12,7 @@
 
 #### Show LOW and above (essentially all issues)
 ./android-quality-checker ./my-project --severity=LOW
+
+
+#### Build for windows
+GOOS=windows GOARCH=amd64 go build -o android-quality-checker.bin android-quality-checker.go

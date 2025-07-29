@@ -9,7 +9,7 @@ USER wine
 WORKDIR /home/wine
 
 # Copy your Windows binary
-COPY android-quality-checker.bin .
+COPY android-quality-checker.exe .
 
 # Make it executable
-RUN chmod +x android-quality-checker.bin 
+RUN chmod +x android-quality-checker.exe
